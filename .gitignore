@@ -16,6 +16,11 @@ __pycache__/
 # Generated output from running the analyzer
 results.csv
 
+# Your own articles dropped in for analysis (may be copyrighted news text) -
+# keep the folder in the repo, but not whatever you put in it
+data/input/*
+!data/input/.gitkeep
+
 # Editor/OS clutter
 .vscode/
 .idea/

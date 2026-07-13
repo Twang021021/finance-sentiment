@@ -41,10 +41,17 @@ finance_sentiment/
   negation.py                 placeholder for future negation handling (see below)
   io_utils.py                 reads .txt article files, writes the results CSV
   evaluate.py                 compares predictions against a labeled dataset
-data/input/                  drop .txt article files here to be analyzed
+data/input/                  drop .txt article files here to be analyzed (gitignored)
+examples/sample_articles/    made-up sample articles that are safe to commit
 examples/labeled_sample.csv  example labeled dataset for the evaluate command
 tests/                       pytest tests for the modules above
 ```
+
+`data/input/` is gitignored on purpose — real news articles dropped there for testing
+are often copyrighted, so they should stay local and never get committed. The three
+original made-up sample articles live in `examples/sample_articles/` instead, which
+*is* tracked. To try the tool with them: `cp examples/sample_articles/*.txt data/input/`
+before running `analyze`.
 
 ## Setup
 

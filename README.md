@@ -28,7 +28,9 @@ pip install -r requirements.txt
 
 ### Analyze articles
 
-Put `.txt` files in a folder (a few samples are already in `data/input/`), then run:
+Put `.txt` files in `data/input/` (this folder is gitignored, since article text you
+drop in there is often copyrighted news content — see "Sample articles" below for a
+safe-to-commit set to try the tool with), then run:
 
 ```
 python main.py analyze --input data/input --output results.csv
@@ -72,20 +74,32 @@ column to compute the metrics.
 pytest
 ```
 
+### Sample articles
+
+`data/input/` is gitignored — anything you drop there (like real news articles)
+stays local and is never committed. A small set of made-up sample articles that
+*are* safe to commit lives in `examples/sample_articles/`. To try the tool out:
+
+```
+cp examples/sample_articles/*.txt data/input/
+python main.py analyze --input data/input --output results.csv
+```
+
 ## Project layout
 
 ```
-main.py                     CLI entry point
+main.py                        CLI entry point
 finance_sentiment/
-  lexicon.py                 loads the LM word list into a word -> weight dict
-  tokenizer.py                splits article text into lowercase words
-  analyzer.py                 core logic: text -> counts, word lists, scores
-  negation.py                 placeholder for future negation handling
-  io_utils.py                 reads .txt article files, writes the results CSV
-  evaluate.py                 compares predictions against a labeled dataset
-data/input/                  drop .txt article files here to be analyzed
-examples/labeled_sample.csv  example labeled dataset for the evaluate command
-tests/                       pytest tests for the modules above
+  lexicon.py                    loads the LM word list into a word -> weight dict
+  tokenizer.py                   splits article text into lowercase words
+  analyzer.py                    core logic: text -> counts, word lists, scores
+  negation.py                    placeholder for future negation handling
+  io_utils.py                    reads .txt article files, writes the results CSV
+  evaluate.py                    compares predictions against a labeled dataset
+data/input/                     drop .txt article files here to be analyzed (gitignored)
+examples/sample_articles/       made-up sample articles, safe to commit
+examples/labeled_sample.csv     example labeled dataset for the evaluate command
+tests/                          pytest tests for the modules above
 ```
 
 ## Extension points
