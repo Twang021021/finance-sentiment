@@ -1,0 +1,4 @@
+pysentiment2
+pandas
+scikit-learn
+pytest
