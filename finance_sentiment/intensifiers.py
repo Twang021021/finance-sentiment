@@ -17,11 +17,16 @@ acceptable," which is itself a negative judgment, not just a magnitude).
 
 Analyzer.py skips these words entirely when matching against the lexicon
 (they never appear in positive_words/negative_words or count toward
-net_score), and instead uses them to multiply the weight of a nearby
-sentiment word, which shows up in weighted_score.
+net_score), and instead uses them to multiply the weight of the closest
+nearby sentiment word, which shows up in weighted_score and the
+intensified_words audit column.
 """
 
 from __future__ import annotations
+
+from .context_rules import RuleEffect
+
+RULE_NAME = "intensifier"
 
 DEFAULT_MULTIPLIER = 1.5
 
@@ -42,21 +47,39 @@ def is_intensifier(token: str) -> bool:
     return token in INTENSIFIER_WORDS
 
 
-def adjacent_multiplier(tokens: list[str], index: int, window: int = 2) -> float:
-    """
-    Combine the multipliers of any intensifier words within `window` tokens
-    before or after `tokens[index]` (e.g. "dramatically improved" or
-    "improved dramatically"). Returns 1.0 (no change) if none are nearby.
-    """
-    multiplier = 1.0
+def _find_closest_intensifier_index(tokens: list[str], index: int, window: int) -> int | None:
+    """Look both before and after tokens[index] for the closest intensifier word within `window` tokens."""
+    best_index = None
+    best_distance = None
     start = max(0, index - window)
     end = min(len(tokens), index + window + 1)
 
     for i in range(start, end):
         if i == index:
             continue
-        factor = INTENSIFIER_WORDS.get(tokens[i])
-        if factor is not None:
-            multiplier *= factor
+        if tokens[i] in INTENSIFIER_WORDS:
+            distance = abs(i - index)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_index = i
 
-    return multiplier
+    return best_index
+
+
+def find_effect(tokens: list[str], index: int, window: int = 3) -> RuleEffect | None:
+    """
+    The context-rule interface used generically by analyzer.py (see
+    context_rules.py): if an intensifier is nearby (e.g. "dramatically
+    improved" or "improved dramatically"), return its multiplier and the
+    reconstructed phrase for the intensified_words audit column. Only the
+    single closest intensifier applies - not every one in range - so there's
+    one clean phrase per hit.
+    """
+    intensifier_index = _find_closest_intensifier_index(tokens, index, window)
+    if intensifier_index is None:
+        return None
+
+    multiplier = INTENSIFIER_WORDS[tokens[intensifier_index]]
+    start, end = sorted((intensifier_index, index))
+    phrase = " ".join(tokens[start : end + 1])
+    return RuleEffect(multiplier=multiplier, phrase=phrase)

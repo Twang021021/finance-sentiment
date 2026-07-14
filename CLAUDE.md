@@ -30,30 +30,40 @@ words (e.g. turns "abandoned" into "abandon") before matching, which would make 
 "words found" output confusing. Instead, `lexicon.py` reads the bundled CSV directly
 and matches whole words as they actually appear, lowercase.
 
-We also merge in a second, general-purpose dictionary — **Harvard IV-4** (the
-"General Inquirer" word list), also bundled free with `pysentiment2` — as a fallback
-for words LM doesn't cover at all. LM always wins where both have an opinion about a
-word; Harvard IV-4 only fills gaps. See "Where each matched word comes from" below.
+We also use a second, general-purpose dictionary — **Harvard IV-4** (the "General
+Inquirer" word list), also bundled free with `pysentiment2` — but *not* merged in
+automatically. Harvard IV-4 turned out to be too noisy for that (see "Where each
+matched word comes from" below for why); instead it's used to *suggest* candidate
+words for a small, hand-approved supplement list. See "Building the supplement
+list" below.
 
 ## Project layout
 
 ```
-main.py                     CLI entry point (run this)
+main.py                        CLI entry point (run this)
 finance_sentiment/
-  lexicon.py                 loads LM (primary) + Harvard IV-4 (fallback) into one
-                              word -> (weight, source) lookup
-  tokenizer.py                splits article text into lowercase words
-  lemmatizer.py                reduces a word to its base form for lexicon lookups
-  negation.py                  flips a word's polarity if a cue like "not" precedes it
-  intensifiers.py              words like "sharply" that amplify a nearby word instead
-                              of carrying their own sentiment
-  analyzer.py                  core logic: text -> counts, word lists, scores
-  io_utils.py                  reads .txt article files, writes the results CSV
-  evaluate.py                  compares predictions against a labeled dataset
-data/input/                  drop .txt article files here to be analyzed (gitignored)
-examples/sample_articles/    made-up sample articles that are safe to commit
-examples/labeled_sample.csv  example labeled dataset for the evaluate command
-tests/                       pytest tests for the modules above
+  lexicon.py                    loads LM (primary) + your approved supplement list
+                                 into one word -> (weight, source) lookup; also
+                                 loads Harvard IV-4 for the suggest-supplement scan
+  supplement_lexicon.csv         your hand-approved extra words (word,weight) -
+                                 edit this directly to add/remove words
+  tokenizer.py                   splits article text into lowercase words
+  lemmatizer.py                   reduces a word to its base form for lexicon lookups
+  context_rules.py                shared RuleEffect shape used by the three
+                                 context rules below (see "Context rules" below)
+  negation.py                     flips a word's polarity if a cue like "not" precedes it
+  intensifiers.py                 words like "sharply" that amplify a nearby word instead
+                                 of carrying their own sentiment
+  diminishers.py                  words like "slightly" that shrink a nearby word's weight
+  directional.py                  words like "rose"/"fell" whose sentiment depends on a
+                                 nearby topic noun (see "Directional words" below)
+  analyzer.py                     core logic: text -> counts, word lists, scores
+  io_utils.py                     reads .txt article files, writes the results CSV
+  evaluate.py                     compares predictions against a labeled dataset
+data/input/                     drop .txt article files here to be analyzed (gitignored)
+examples/sample_articles/       made-up sample articles that are safe to commit
+examples/labeled_sample.csv     example labeled dataset for the evaluate command
+tests/                          pytest tests for the modules above
 ```
 
 `data/input/` is gitignored on purpose — real news articles dropped there for testing
@@ -79,12 +89,20 @@ python main.py analyze --input data/input --output results.csv
 ```
 
 The output CSV has columns: `filename, positive_count, negative_count,
-positive_words, negative_words, negated_words, net_score, weighted_score`. Word
-lists are semicolon-separated inside their cell. Each word in `positive_words`/
-`negative_words` is shown as `word[SOURCE]`, e.g. `surged[HIV4]; profitable[LM]` —
-see "Where each matched word comes from" below. `negated_words` lists the full
-phrase (e.g. `not good`) for any word whose polarity got flipped by negation, so
-you can audit those cases at a glance.
+positive_words, negative_words, negated_words, intensified_words,
+diminished_words, directional_words, net_score, weighted_score`. Word lists are
+semicolon-separated inside their cell. Each word in `positive_words`/
+`negative_words` is shown as `word[SOURCE:MATCH]`, e.g. `surged[SUPP:exact]`,
+`declining[LM:lemma]`, `fell[TOPIC:exact]` — SOURCE is which lexicon it matched
+from ("LM", "SUPP", or "TOPIC" for a directional word resolved via a nearby
+topic noun — see "Directional words" below), MATCH is whether it matched its
+exact spelling or via its lemma/base form (see "How matching actually works"
+below — lemma matches are worth auditing since that's where semantic drift like
+"latest"->"late" can sneak in). The last four of those columns are the **context
+rules**' audit trails — `negated_words`, `intensified_words`, `diminished_words`,
+and `directional_words` each list the phrase that triggered that specific rule
+(e.g. `not good`, `sharply declined`, `slightly improved`, `profits fell`), so
+every rule's effect is separately auditable. See "Context rules" below.
 
 Evaluate against a labeled dataset (see format below):
 
@@ -94,6 +112,25 @@ python main.py evaluate --labeled examples/labeled_sample.csv
 
 This prints Accuracy, macro-averaged Precision, macro-averaged F1-score, and a
 per-class breakdown.
+
+Scan articles for candidate words to add to the supplement list (see "Building
+the supplement list" below):
+
+```
+python main.py suggest-supplement --input data/input --output supplement_candidates.csv
+```
+
+List every word that matched the lexicon via its lemma rather than its exact
+spelling (read-only, prints to the console — see "Match-type provenance" below
+for why lemma matches are worth auditing):
+
+```
+python main.py lemma-report --input data/input
+```
+
+Each line shows `surface_word -> lemma  (weight=..., lexicon=..., frequency=...)`.
+Words in `LEMMA_EXCLUDED_WORDS` (e.g. `"latest"`) never appear here, since they
+can't match via lemma at all.
 
 Run the test suite:
 
@@ -144,7 +181,57 @@ words that actually appear in SEC filings, so common inflected forms were alread
 swept up individually. Lemmatization is a safety net for less common forms, not a
 big new source of matches.
 
-## Negation handling
+### Match-type provenance, and a real bug it caught: "latest"
+
+Every matched word records **how** it matched, not just which lexicon it came
+from — `MatchedWord.match_type` is `"exact"` or `"lemma"`, shown in the output as
+the second half of the `[SOURCE:MATCH]` tag (e.g. `declining[LM:lemma]`). This
+matters because lemma matches are exactly the ones prone to semantic drift: a
+word's lemma can carry a different meaning than the word itself.
+
+That's not hypothetical — it's how we found a real bug. "latest" lemmatizes to
+`"late"`, which is correctly in LM's negative list (e.g. "late payment," "late
+filing"), but "latest" just means "most recent" and has no sentiment of its own.
+Before match-type tagging existed, this was invisible: "latest" would show up
+tagged `[LM]` exactly like a real negative match, with nothing to distinguish it
+from an intentional one.
+
+The fix is `LEMMA_EXCLUDED_WORDS` in `lexicon.py`: a small, hand-editable set of
+surface words that can only ever match their own exact spelling — the lemma path
+is skipped for them entirely, even when the lemma would otherwise hit. It's
+seeded with `"latest"`. If you spot another word whose `[…:lemma]` tag looks
+wrong, add it here; its exact spelling (if it's ever a real lexicon word on its
+own) still matches normally, only the lemma shortcut is disabled.
+`suggest_supplement_candidates()` (the `suggest-supplement` scan) respects this
+list too, since it shares the same `lookup_word()` function `SentimentAnalyzer`
+uses — so an excluded word won't get suggested as a false candidate either.
+
+## Context rules
+
+Negation, intensifiers, and diminishers are all **context rules**: something
+that adjusts a matched word's weight based on a nearby cue word, rather than
+the word's own lexicon entry. They share one shape (`context_rules.py`):
+
+```python
+@dataclass(frozen=True)
+class RuleEffect:
+    multiplier: float   # how much to scale the matched word's weight by
+    phrase: str          # the phrase for the rule's audit column, e.g. "not good"
+```
+
+Each rule module exposes a `RULE_NAME` and a
+`find_effect(tokens, index, window=3) -> RuleEffect | None`. `analyzer.py` runs
+every rule generically for each matched word — multiplying `weight` by every
+effect found and recording `effect.phrase` in that rule's own audit column.
+Adding a future rule type is one new module plus one line in `analyzer.py`'s
+`CONTEXT_RULES` list; nothing else needs to change.
+
+**Guardrail:** a context rule only ever looks at a fixed cue-word set (like
+`NEGATION_WORDS`) — never at another matched sentiment word's polarity. Mixed-
+sentiment sentences ("strong revenue but weak margins") are legitimate and stay
+mixed; nothing here nudges one sentiment word based on another one nearby.
+
+### Negation
 
 If a sentiment word is preceded within 3 tokens by a cue word ("not", "no",
 "never", "without", "hardly", ...; see `NEGATION_WORDS` in `negation.py`), its
@@ -160,7 +247,14 @@ continuous scale), flipping the sign is the simplest rule that still points in t
 right direction. Every flipped case is listed in the `negated_words` output column
 (e.g. `not good`) so you can spot-check whether the heuristic got it right.
 
-## Intensifiers
+Negation is the one context rule that's **backward-only** (it only looks at
+tokens *before* the sentiment word), unlike intensifiers/diminishers/directional
+words below, which look both ways. English negation cues precede what they
+negate ("not good", never "good not") — checking forward too would risk
+misattributing a later, unrelated negation, e.g. in "good, not bad", a forward
+check could wrongly flag "good" using the "not" that actually negates "bad".
+
+### Intensifiers
 
 A handful of LM words are pure degree/magnitude modifiers rather than words with
 sentiment of their own — "sharply" isn't good or bad by itself, it just makes
@@ -173,81 +267,202 @@ overall.
 `severely`, `drastically` (previously counted as their own LM-negative words) and
 `greatly`, `tremendously`, `exceptionally` (previously LM-positive). These never
 appear in `positive_words`/`negative_words` and never affect `net_score` — instead,
-when one is adjacent (within 2 tokens) to a sentiment word, it multiplies that
-word's weight by 1.5x, which shows up in `weighted_score` only.
+when one is within 3 tokens of a sentiment word (before or after), it multiplies
+that word's weight by 1.5x, which shows up in `weighted_score` and the
+`intensified_words` column. If more than one intensifier is nearby, only the
+**closest** one applies (they don't stack) — this keeps one clean phrase per hit
+for the audit column, the same way negation only uses the closest cue.
 
 We deliberately kept this list narrow. Some similar-looking LM words were left out
 because they carry their own judgment even with nothing to modify — e.g.
 "excessively," "unduly," and "grossly" all imply "more than is acceptable," which
 is itself a negative judgment, not just a magnitude.
 
-## Where each matched word comes from (LM vs. Harvard IV-4)
+### Diminishers
+
+The mirror image of intensifiers: `diminishers.py` lists `slightly`, `somewhat`,
+`modestly`, and `barely`, each with a 0.5x multiplier that **shrinks** a nearby
+word's weight instead of amplifying it ("slightly higher" should count for less
+than a plain "higher"). Same closest-match-only rule as intensifiers, logged in
+the `diminished_words` column. Unlike the intensifier words, none of these are
+LM words being reclassified — this is new coverage, not a migration.
+
+## Directional words
+
+Words like "rise," "fall," "climb," "decline," "drop," and "gain" carry no
+sentiment of their own — whether "profits fell" is good or bad news depends
+entirely on what's falling. "Profits fell" is negative; "costs fell" is
+positive. A flat lexicon entry (which is what LM used to do for
+"decline"/"gain," and what Harvard IV-4 does for "drop") can't express that.
+
+`directional.py` resolves these against two small, explicit topic-noun lists:
+
+```python
+POSITIVE_TOPICS = {"profit", "profits", "revenue", "revenues", "growth",
+                    "margin", "margins", "earnings", "demand", "gains"}
+NEGATIVE_TOPICS = {"cost", "costs", "loss", "losses", "debt", "default",
+                    "defaults", "litigation", "unemployment"}
+```
+
+The rule, searching up to 3 tokens either side of the directional word for the
+closest topic noun:
+
+| topic | direction | result |
+|---|---|---|
+| positive-topic | up | positive ("profits rose") |
+| positive-topic | down | negative ("profits fell") |
+| negative-topic | down | positive ("costs fell") |
+| negative-topic | up | negative ("costs rose") |
+
+If there's **no topic noun nearby**, the directional word contributes nothing at
+all — same principle as an intensifier with nothing nearby to amplify. A
+resolved directional word shows up in `positive_words`/`negative_words` tagged
+`[TOPIC:exact]` (not `[LM]`/`[SUPP]`, since its weight didn't come from a
+lexicon lookup), and its phrase (e.g. `profits fell`) is logged in the
+`directional_words` column.
+
+`erased`/`erase`/`erasing`/`erases` are also handled here, as a "down" (removing/
+eliminating) direction — "erased losses" resolves positive (negative-topic +
+down = positive), "erased gains" resolves negative. That's why `gains` is in
+`POSITIVE_TOPICS`: so it can pair with `losses` (already there) as the two nouns
+`erased` most commonly modifies.
+
+### Why explicit surface forms, not lemmas
+
+`DIRECTIONAL_WORDS` lists every inflection by hand (`rise/rises/rising/rose/
+risen`, `fall/falls/falling/fell/fallen`, etc.) instead of matching a lemma the
+way normal lexicon lookups do. We checked `simplemma` on exactly these words
+first, and it has real gaps that would have silently broken this feature:
+`rose` and `fell` — the two most common forms in headlines — don't reduce to
+`rise`/`fall` at all (they lemmatize to themselves), and `dropping` doesn't
+reduce to `drop` either. Relying on lemma fallback here would have missed
+exactly the words real news headlines use most.
+
+### Migrating `decline`/`gain`/`drop` off flat lexicon scoring
+
+`analyzer.py` checks `is_directional(token)` **before** the normal lexicon
+lookup, so directional words are always intercepted here regardless of what's
+still sitting in the underlying LM/Harvard IV-4 data (we don't hand-edit those
+vendored CSV files). Checked directly: LM had `decline`/`declines`/`declining`/
+`declined` (all -1.0) and `gain`/`gains`/`gaining`/`gained` (all +1.0) as flat
+entries; Harvard IV-4 separately had `drop` (-1.0, not in LM at all). All of
+these are now fully handled by the topic-resolution system above instead —
+`tests/test_analyzer.py::test_decline_and_gain_are_migrated_off_flat_lm_scoring`
+confirms a bare "decline"/"gain" with no topic noun nearby now scores as
+neutral, where it used to score flat regardless of context.
+`suggest_supplement_candidates()` also excludes directional words from its
+candidate list for the same reason — e.g. `drop` would otherwise resurface as a
+"new" Harvard IV-4 candidate even though it's already handled.
+
+### Known simplification, not fixed here
+
+`surged`, `sank`, `slumped`, `plunge`, and `tumble` (all flat entries in
+`supplement_lexicon.csv`) are topic-dependent the same way `decline`/`gain`
+were — e.g. "inflation surged" is bad news, but a flat `surged: +1.0` scores it
+positive. If evaluation ever shows errors specifically on inflation/costs/yields
+articles (where "rising" is bad, unlike for profits/revenue), these are the
+words to migrate into `directional.py` next.
+
+## Where each matched word comes from (LM vs. supplement)
 
 Every matched word's source lexicon is shown in the output as `word[LM]` or
-`word[HIV4]`. `lexicon.py`'s `load_combined_lexicon()` builds this: it starts from
-LM, then adds any Harvard IV-4 word LM doesn't already have an opinion on. LM always
-wins on overlap.
+`word[SUPP]`. `lexicon.py`'s `load_combined_lexicon()` builds this from two
+**automatic** sources: LM (primary) and `supplement_lexicon.csv` (your approved
+extra words). LM always wins on overlap. Harvard IV-4 is **not** one of the
+automatic sources — see below for why, and "Building the supplement list" for how
+it's used instead.
 
-Harvard IV-4 is a general-purpose (not finance-specific) dictionary, so it's
-strictly a fallback, and it's less precise than LM. Two things worth knowing about
-how it's filtered (see `load_hiv4_lexicon()` for the exact logic):
-- A Harvard IV-4 word can have several numbered "senses" (e.g. `COMPANY#1` the
-  business entity vs. `COMPANY#2` the fact of being with someone), and only some
-  senses may be tagged positive/negative. We only trust a word's **most common**
-  sense (`#1`, or its only sense if unnumbered) — e.g. "company" is correctly
-  excluded because its `#1` sense isn't tagged, even though its rarer `#2` sense
-  happens to be tagged positive. Trusting anything past `#1` would just be guessing
-  at which meaning is intended.
-- Even with that filter, false positives happen for finance-neutral words that
-  carry unrelated everyday connotations — and on real news articles this turned
-  out to be a bigger effect than expected, not just an occasional edge case. We
-  tested on 3 real articles: **51-76% of all matched words came from HIV-4, not
-  LM** — words like `share`, `main`, `open`, `interest`, `war`, `cost`, and `need`
-  all got tagged as sentiment words, which a finance-aware reader wouldn't count.
-  HIV-4 has roughly 3,600 tagged words vs. LM's ~2,700, and general news prose
-  uses a lot more everyday vocabulary than the formal filing language LM was built
-  from — so HIV-4's breadth ends up dominating by sheer word count, even though LM
-  always wins on any word both lexicons agree on. In practice this means
-  `weighted_score`/`net_score` are now driven more by generic-English sentiment
-  than finance-specific judgment. If this matters for your use case, the fix is
-  to add specific noisy words to a small excluded-words list in `lexicon.py`
-  (not implemented yet), or to drop the HIV-4 fallback and rely on LM alone
-  (`load_lm_lexicon()` + manually build a `LexiconEntry` dict, or just skip the
-  `load_combined_lexicon()` call in `main.py`) if precision matters more than
-  covering LM's gaps.
+### Why Harvard IV-4 isn't merged in automatically
+
+We tried this first (merging in Harvard IV-4, a general-purpose, not finance-
+specific dictionary, as an automatic fallback for anything LM didn't cover) and
+measured the result on 3 real news articles: **51-76% of all matched words came
+from Harvard IV-4, not LM** — words like `share`, `main`, `open`, `interest`,
+`war`, `cost`, and `need` all got tagged as sentiment words, which a finance-aware
+reader wouldn't count. Harvard IV-4 has roughly 3,600 tagged words vs. LM's
+~2,700, and general news prose uses a lot more everyday vocabulary than the
+formal filing language LM was built from — so its breadth dominated by sheer word
+count. In practice, `weighted_score`/`net_score` ended up driven more by generic-
+English sentiment than finance-specific judgment.
+
+So Harvard IV-4 is now used only for *suggesting* candidates — never merged in
+directly. This preserves one genuinely useful piece of it: even restricted to a
+word's most common sense (see `load_hiv4_lexicon()`'s docstring for the `#1`-
+sense filtering logic, still used for scanning), Harvard IV-4 does catch a few
+real finance-relevant words LM misses entirely (`sank`, `slump`, `surge`,
+`rally`) — they just need a human to confirm they're not noise before they're
+trusted, rather than being trusted automatically.
+
+## Building the supplement list
+
+`python main.py suggest-supplement --input data/input --output supplement_candidates.csv`
+scans your articles for words that would match Harvard IV-4 but aren't already
+covered by LM or your current supplement list, and writes them out as
+`word, hiv4_weight, frequency`, sorted by frequency so the most impactful
+candidates are easiest to review. It never edits `supplement_lexicon.csv` itself
+— you copy over whichever rows you approve by hand. That file has two columns,
+`word,weight`; a missing or empty file just means no supplement words, not an
+error.
+
+The starter list already in `supplement_lexicon.csv` was built this way from 3
+real articles, filtered by hand down to genuinely useful, unambiguous-direction
+words (`surged`, `rally`, `optimism`, `upbeat`, `rosy`, `steady`, `sank`,
+`slumped`, `dumped`), plus 5 words added with no lexicon source at all (`plunge`,
+`tumble`, `rout`, `routed`, `selloff` — see below for why `routed` needed its own
+row). Tempting-looking candidates were deliberately left out where they're too
+context-dependent to trust as a flat weight — e.g. `profit` (LM/Harvard IV-4 tag
+it positive, but "profit warning" is negative), `crushed`/`ripped` (can mean
+either "beat estimates" or "got hurt," depending on direction), and words that
+were false positives from an unrelated sense in the source text (`artificial`
+from "artificial intelligence," `fabrication` from "chip fabrication").
+
+**Known simplification:** `surged`, `sank`, `slumped`, `plunge`, and `tumble` are
+kept as flat entries even though they're technically topic-dependent too, the
+same way `decline`/`gain` used to be — see "Directional words" above for the
+system that now handles that class of word, and why these five weren't migrated
+into it yet.
+
+### A lemmatizer quirk worth knowing: `routed`
+
+`simplemma` (see "How matching actually works" above) incorrectly lemmatizes
+"routed" to `"route"` (a different word), not `"rout"` — so relying on lemma
+fallback from a `rout` entry alone would silently miss the inflected form real
+headlines actually use ("stocks were routed"). That's why `routed` has its own
+explicit row in `supplement_lexicon.csv` instead of relying on the lemma path
+like `plunge`/`tumble` do for their own inflections.
+
+### Correcting an earlier mistake
+
+An earlier summary from this project claimed "sank" doesn't match at all. That
+was wrong — it was a stale leftover from before Harvard IV-4 was wired in at all,
+never corrected afterward. Traced end-to-end: `sank` matches via its **exact
+surface form** (no lemmatization involved — `_lookup()` tries the exact spelling
+first and only falls back to a lemma on a miss, so lemma fallback can only ever
+*add* matches, never shadow an existing exact one). `tests/test_analyzer.py::
+test_sank_matches_via_supplement_regression` pins this down.
 
 ### Words we still can't catch, and why
 
-Words like "plunged," "tumbled," "sank" (now caught via HIV-4, see below),
-"selloff," and "rout" are common in financial *news* but were largely absent from
-both lexicons we checked:
+`selloff` doesn't match hyphenated ("sell-off") or two-word ("sell off") spellings
+— `tokenizer.py` splits on anything that isn't a letter, so those would tokenize
+into separate words. Not fixed here; a known limitation of single-token matching.
 
-- **LM**: none of `plunge`, `tumble`, `sink`, `rout`, `selloff` (in any inflection)
-  appear at all. This isn't a matching-technique problem lemmatization can fix —
-  the words simply aren't in the list. That's because LM was built from formal SEC
-  filing language ("declined," "adversely affected"), not news-headline vocabulary
-  ("plunged," "tumbled").
-- **Harvard IV-4**: partially helps — `sank` and `slump` are tagged negative,
-  `surge` and `rally` are tagged positive (all four now flow through the fallback
-  merge above) — but `plunge`, `tumble`, `sink` (base form), `rout`, and `selloff`
-  are still untagged.
-- **VADER** (checked, not merged in): only `crash` is present; everything else is
-  absent. VADER's ~7,500-word lexicon skews toward social-media/informal language.
-- **SentiWordNet** (checked, not merged in): scores nearly all of these words as
-  "objective"/neutral, even senses whose definitions literally say "decline
-  markedly" or "suffer a sudden downfall." It's automatically derived from WordNet
-  glosses, and physical-motion verbs like "sink" or "plunge" aren't inherently
-  emotionally loaded in general English — their negative meaning is specific to the
-  financial context, which is exactly the kind of domain nuance general lexicons
-  don't capture (ironically, the same reason LM had to be built in the first
-  place).
+More broadly, we checked VADER and SentiWordNet (in addition to Harvard IV-4)
+against this class of financial-news vocabulary before deciding to hand-curate
+the supplement list instead of merging in another lexicon:
+- **VADER**: only `crash` is present; everything else checked is absent. VADER's
+  ~7,500-word lexicon skews toward social-media/informal language.
+- **SentiWordNet**: scores nearly all of these words as "objective"/neutral, even
+  senses whose definitions literally say "decline markedly" or "suffer a sudden
+  downfall." It's automatically derived from WordNet glosses, and physical-motion
+  verbs like "sink" or "plunge" aren't inherently emotionally loaded in general
+  English — their negative meaning is specific to the financial context, which is
+  exactly the kind of domain nuance general lexicons don't capture (ironically,
+  the same reason LM had to be built in the first place).
 
-**Bottom line:** there's no clean off-the-shelf lexicon that closes this gap. If
-this news-headline vocabulary matters for your use case, the realistic path is a
-small, explicitly-labeled supplementary word list (e.g. 20-30 market-movement
-verbs) added deliberately to `lexicon.py`, clearly separated from LM/HIV-4 rather
-than blended in — that's a manual step, but a small, visible, auditable one, not
-ad hoc lexicon pollution.
+**Bottom line:** there's no clean off-the-shelf lexicon that fully closes this
+gap — the supplement-list workflow above (scan, review, approve by hand) is the
+realistic path, not a bigger automatic merge.
 
 ## Extension points already built into the code
 
@@ -257,9 +472,17 @@ ad hoc lexicon pollution.
   some words count more than others (e.g. "bankruptcy" = -3.0), just edit the
   weights in `lexicon.py` — `analyzer.py` and everything downstream will pick it up
   automatically.
-- **Intensifier strength.** `intensifiers.py`'s `DEFAULT_MULTIPLIER` (1.5) and the
-  per-word `INTENSIFIER_WORDS` dict are both easy to tune independently per word.
+- **Intensifier/diminisher strength.** `intensifiers.py`'s and `diminishers.py`'s
+  `DEFAULT_MULTIPLIER` and per-word dicts are both easy to tune independently per
+  word.
+- **New context rules.** Any new rule that scales a matched word's weight based
+  on a nearby cue word is one new module (`RULE_NAME` + `find_effect()`, see
+  "Context rules") plus one line in `analyzer.py`'s `CONTEXT_RULES` list.
+- **New topic nouns / directional words.** `directional.py`'s `POSITIVE_TOPICS`,
+  `NEGATIVE_TOPICS`, and `DIRECTIONAL_WORDS` are plain sets/dicts — easy to
+  extend (e.g. adding `yields` as a topic, or migrating `surged`/`sank` in from
+  the supplement list, per the known simplification above).
 - **Negation dampening.** Right now negation fully flips a word's sign. A more
   nuanced version (dampen the magnitude instead of a full flip, similar to how
-  VADER does it) would only require changing `negation.py`'s effect on `weight` in
-  `analyzer.py`, once weights are more than just ±1.
+  VADER does it) would only require changing `negation.py`'s `find_effect()` to
+  return a smaller-magnitude multiplier, once weights are more than just ±1.
