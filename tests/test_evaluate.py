@@ -2,12 +2,13 @@ import csv
 
 from finance_sentiment.analyzer import SentimentAnalyzer
 from finance_sentiment.evaluate import evaluate, score_to_label
+from finance_sentiment.lexicon import LexiconEntry
 
 TEST_LEXICON = {
-    "profitable": 1.0,
-    "strong": 1.0,
-    "bankruptcy": -1.0,
-    "losses": -1.0,
+    "profitable": LexiconEntry(1.0, "LM"),
+    "strong": LexiconEntry(1.0, "LM"),
+    "bankruptcy": LexiconEntry(-1.0, "LM"),
+    "losses": LexiconEntry(-1.0, "LM"),
 }
 
 

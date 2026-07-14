@@ -1,4 +1,5 @@
 pysentiment2
 pandas
 scikit-learn
+simplemma
 pytest

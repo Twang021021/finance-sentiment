@@ -1,12 +1,18 @@
 """
-Negation handling — NOT IMPLEMENTED YET.
+Negation handling: if a sentiment word is preceded within a few words by a
+negation cue ("not", "no", "never", ...), its polarity gets flipped rather
+than just ignored.
 
-This module is an intentional placeholder / extension point. Right now
-`is_negated` always returns False, so analyzer.py behaves as if negation
-doesn't exist. The words and function signature are already here so that a
-future version can flip a word's effect when it's preceded by a word like
-"not" or "never" (e.g. "not good" should stop counting "good" as positive)
-without having to change any other file.
+Why flip instead of suppress (zero out)? "Not good" reads to a person as
+leaning negative, not as neutral — suppressing would throw that signal away
+entirely. Flipping is the standard simple heuristic used in rule-based
+sentiment systems (e.g. it's the basis for the sign change VADER's negation
+handling applies). It's not perfect — "not terrible" doesn't really mean
+"great" the way flipping implies — but with a lexicon that only has +1/-1
+weights (not a continuous scale), flip-the-sign is the simplest rule that
+still captures the right general direction. A more nuanced dampened-flip
+(shrink the magnitude instead of fully reversing it) would be a natural
+next step once weighted_score weights are more than just ±1.
 """
 
 from __future__ import annotations
@@ -25,14 +31,15 @@ NEGATION_WORDS = {
 }
 
 
-def is_negated(tokens: list[str], index: int, window: int = 3) -> bool:
+def find_negation_cue_index(tokens: list[str], index: int, window: int = 3) -> int | None:
     """
-    Should the token at `tokens[index]` be treated as negated?
-
-    Currently always returns False (negation handling is not implemented
-    yet). `tokens`, `index`, and `window` are accepted now so the calling
-    code in analyzer.py already has the wiring in place; a future
-    implementation would look at `tokens[index - window : index]` for a
-    word in NEGATION_WORDS.
+    Look backward from `tokens[index]` for a negation cue within `window`
+    tokens before it. Returns the index of the closest cue found (so the
+    caller can reconstruct the full negated phrase), or None if there isn't
+    one nearby.
     """
-    return False
+    start = max(0, index - window)
+    for i in range(index - 1, start - 1, -1):
+        if tokens[i] in NEGATION_WORDS:
+            return i
+    return None

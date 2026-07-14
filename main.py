@@ -13,11 +13,11 @@ import argparse
 from finance_sentiment.analyzer import SentimentAnalyzer
 from finance_sentiment.evaluate import evaluate, format_report
 from finance_sentiment.io_utils import read_articles_from_folder, write_results_csv
-from finance_sentiment.lexicon import load_lm_lexicon
+from finance_sentiment.lexicon import load_combined_lexicon
 
 
 def run_analyze(input_folder: str, output_path: str) -> None:
-    lexicon = load_lm_lexicon()
+    lexicon = load_combined_lexicon()
     analyzer = SentimentAnalyzer(lexicon)
 
     articles = read_articles_from_folder(input_folder)
@@ -31,7 +31,7 @@ def run_analyze(input_folder: str, output_path: str) -> None:
 
 
 def run_evaluate(labeled_csv_path: str) -> None:
-    lexicon = load_lm_lexicon()
+    lexicon = load_combined_lexicon()
     analyzer = SentimentAnalyzer(lexicon)
 
     results = evaluate(labeled_csv_path, analyzer)
