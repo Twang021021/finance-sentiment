@@ -1,7 +1,6 @@
 # Changelog
 
-A running history of major changes to this project, newest first. See
-`CLAUDE.md` for how everything currently works and why.
+A running history of major changes to this project, newest first.
 
 ## Generalized context-rule engine
 
@@ -65,5 +64,4 @@ word against the **Loughran-McDonald (LM)** financial word list (via
 `pysentiment2`, read directly rather than through its stemming API so
 matches stay exact and interpretable). Outputs positive/negative word counts,
 the actual matched words, and net/weighted scores per article. Added an
-`evaluate` command (Accuracy/Precision/F1 against a labeled CSV) and a
-beginner-focused `CLAUDE.md`.
+`evaluate` command (Accuracy/Precision/F1 against a labeled CSV)
