@@ -5,9 +5,7 @@ by looking up each word against the **Loughran-McDonald (LM) financial sentiment
 word list** — a word list built specifically for financial text, so words like
 "liability" or "tax" aren't treated as negative just because they sound negative
 in everyday English. Words LM doesn't cover can be added to a small, hand-approved
-supplement list (see `supplement_lexicon.csv`) — there's a built-in command to
-help you find good candidates from the general-purpose Harvard IV-4 dictionary,
-but nothing from it is trusted automatically (see CLAUDE.md for why).
+supplement list (see `supplement_lexicon.csv`) 
 
 This is a lexicon lookup, not machine learning: matching also accounts for
 inflected forms (via lemmatization), negation ("not good"), intensifiers
